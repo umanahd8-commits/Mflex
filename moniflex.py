@@ -5,16 +5,29 @@ import time
 import datetime
 import random
 import os
+import psycopg2
+import sqlite3  # remove this line if using PostgreSQL only
 
-# ---------- CONFIG ----------
-BOT_TOKEN = "8478769265:AAFk0HRmbbNwulr1DEu7-QYojsQ4yBv3kaA"
+# --- CONFIG ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8478769265:AAFk0HRmbbNwu1r1DEu7-QYojsQ4yBv3kaA")
 ADMIN_IDS = [7753547171, 8303629661]
-DB_PATH = "earning_bot.db"
 JOIN_FEE = 2000
 REFERRAL_BONUS = 1000
 VIP_UPGRADE_COST = 5000
 VIP_REFERRAL_BONUS = 1300
 MIN_WITHDRAW = 4000
+
+# Database connection function
+def get_db_connection():
+    try:
+        # Try PostgreSQL first (for Railway)
+        DATABASE_URL = os.environ['DATABASE_URL']
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        return conn
+    except:
+        # Fallback to SQLite (for local development)
+        conn = sqlite3.connect('earning_bot.db')
+        return conn
 
 SPIN_OUTCOMES = [
     ("100", 0.50),
