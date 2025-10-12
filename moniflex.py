@@ -5,6 +5,7 @@ import time
 import datetime
 import random
 import os
+import psycopg2
 
 # ---------- CONFIG ----------
 BOT_TOKEN = "8478769265:AAFk0HRmbbNwulr1DEu7-QYojsQ4yBv3kaA"
