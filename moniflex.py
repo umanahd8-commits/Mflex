@@ -412,11 +412,14 @@ def deposit_start(m):
             f"{BANK_ACCOUNT_INFO}\n\n"
             "Please transfer and then upload your payment receipt in this chat (photo or document). I'll ask you to enter the amount you paid and then forward the receipt to admins for approval."
         )
+    
+    # Set pending action to indicate user is in deposit flow
+    create_pending_action(m.from_user.id, "awaiting_deposit_receipt", "")
     bot.send_message(m.chat.id, txt, parse_mode="Markdown", reply_markup=main_menu_markup_for(m.from_user.id))
 
-# FIXED: Receipt handler - accepts receipts from any user
-@bot.message_handler(content_types=['photo', 'document'])
-def handle_receipt(m):
+# FIXED: Receipt handler - only accepts receipts when user is in deposit flow
+@bot.message_handler(content_types=['photo', 'document'], func=lambda m: get_pending_action(m.from_user.id) and get_pending_action(m.from_user.id)[2] == "awaiting_deposit_receipt")
+def handle_deposit_receipt(m):
     ensure_user(m.from_user)
     
     # Check if user already has a pending deposit
@@ -424,9 +427,10 @@ def handle_receipt(m):
     
     if pending_deposit:
         bot.reply_to(m, "❌ You already have a deposit request pending approval. Please wait for admin to process your current request.")
+        clear_pending_action(m.from_user.id)
         return
     
-    # Accept receipts from any user who sends photo/document
+    # Get file ID
     file_id = None
     content_type = m.content_type
     if content_type == 'photo':
@@ -1058,6 +1062,11 @@ def fallback(m):
             )
             send_to_all_admins(txt, reply_markup=withdraw_approve_buttons(wid, m.from_user.id))
             return
+    
+    # Handle random photo/document uploads when not in deposit flow
+    if m.content_type in ['photo', 'document']:
+        bot.reply_to(m, "❌ I only accept receipts when you're in the deposit process. Please use the '💳 Deposit / Pay Fee' button first to start a deposit request.")
+        return
     
     txt = (
         "I didn't understand that. Use the menu below.\n\n"
