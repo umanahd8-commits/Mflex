@@ -7,21 +7,15 @@ import random
 import os
 
 # ---------- CONFIG ----------
-# Your bot token (as requested to include)
 BOT_TOKEN = "8478769265:AAFk0HRmbbNwulr1DEu7-QYojsQ4yBv3kaA"
-
-# Two admin IDs (you provided these)
 ADMIN_IDS = [7753547171, 8303629661]
-
 DB_PATH = "earning_bot.db"
-
 JOIN_FEE = 2000
 REFERRAL_BONUS = 1000
 VIP_UPGRADE_COST = 5000
 VIP_REFERRAL_BONUS = 1300
 MIN_WITHDRAW = 4000
 
-# Lucky spin probabilities (sum to 1.0)
 SPIN_OUTCOMES = [
     ("100", 0.50),
     ("200", 0.30),
@@ -29,7 +23,6 @@ SPIN_OUTCOMES = [
     ("TRY_AGAIN", 0.15),
 ]
 
-# Deposit account details (as requested)
 BANK_ACCOUNT_INFO = (
     "💳 Account Details:\n"
     "Account number: 6141995408\n"
@@ -37,7 +30,6 @@ BANK_ACCOUNT_INFO = (
     "Bank: Opay"
 )
 
-# Links
 UPDATES_CHANNEL_URL = "https://t.me/moniflex1"
 HELP_SUPPORT_URL = "https://t.me/MONIFLEXBOT1"
 
@@ -64,23 +56,20 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         amount INTEGER,
-        status TEXT, -- awaiting_amount, pending, approved, rejected, cancelled
+        status TEXT,
         receipt_file_id TEXT,
         created_at INTEGER
     )""")
-    
-    # Create withdrawals table with new columns
     cur.execute("""CREATE TABLE IF NOT EXISTS withdrawals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         amount INTEGER,
-        status TEXT, -- pending, approved, rejected, processing, completed
+        status TEXT,
         account_details TEXT,
         admin_receipt_file_id TEXT,
         created_at INTEGER,
         processed_at INTEGER
     )""")
-    
     cur.execute("""CREATE TABLE IF NOT EXISTS referrals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         referrer_id INTEGER,
@@ -92,34 +81,23 @@ def init_db():
     cur.execute("""CREATE TABLE IF NOT EXISTS pending_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER UNIQUE,
-        action TEXT,  -- awaiting_deposit_amount, awaiting_withdraw_amount, awaiting_account_details
+        action TEXT,
         data TEXT,
         created_at INTEGER
     )""")
     conn.commit()
     conn.close()
-    
-    # Migrate existing withdrawals table if needed
     migrate_db()
 
 def migrate_db():
-    """Simple migration - fix withdrawals table schema"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    
     try:
-        # Check if account_details column exists by trying to select from it
         cur.execute("SELECT account_details FROM withdrawals LIMIT 1")
         print("Withdrawals table already has the new columns!")
-        
     except sqlite3.OperationalError:
-        # Column doesn't exist, so we need to migrate
         print("Migrating withdrawals table to add new columns...")
-        
-        # Create temporary backup
         cur.execute("CREATE TABLE IF NOT EXISTS withdrawals_backup AS SELECT * FROM withdrawals")
-        
-        # Drop and recreate with new schema
         cur.execute("DROP TABLE IF EXISTS withdrawals")
         cur.execute("""CREATE TABLE withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,14 +109,10 @@ def migrate_db():
             created_at INTEGER,
             processed_at INTEGER
         )""")
-        
-        # Copy data back from backup
         cur.execute("INSERT INTO withdrawals (id, user_id, amount, status, created_at) SELECT id, user_id, amount, status, created_at FROM withdrawals_backup")
-        
         cur.execute("DROP TABLE withdrawals_backup")
         conn.commit()
         print("Withdrawals table migrated successfully!")
-    
     conn.close()
 
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
@@ -213,7 +187,6 @@ def user_is_admin(user_id):
     return user_id in ADMIN_IDS
 
 def send_to_all_admins(text=None, **kwargs):
-    # Send message to all admins. kwargs passed to send_message/send_photo, etc.
     for aid in ADMIN_IDS:
         try:
             if kwargs.get("photo"):
@@ -223,7 +196,6 @@ def send_to_all_admins(text=None, **kwargs):
             else:
                 bot.send_message(aid, text, parse_mode=kwargs.get("parse_mode"), reply_markup=kwargs.get("reply_markup"))
         except Exception:
-            # ignore failures to reach some admins
             pass
 
 # ---------- MARKUPS ----------
@@ -317,20 +289,17 @@ def help_cmd(m):
     inline.add(types.InlineKeyboardButton("📩 Contact Support", url=HELP_SUPPORT_URL))
     bot.send_message(m.chat.id, txt, parse_mode="Markdown", reply_markup=inline)
 
-# ADMIN COMMANDS - MUST COME BEFORE OTHER HANDLERS
+# ADMIN COMMANDS
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(m):
-    print(f"Admin panel command received from user {m.from_user.id}")
     if not user_is_admin(m.from_user.id):
         bot.send_message(m.chat.id, "❌ Unauthorized. You are not an admin.")
         return
-    print(f"Sending admin panel to user {m.from_user.id}")
     bot.send_message(m.chat.id, "🛠 *Admin Panel* - Select an option below:", 
                     parse_mode="Markdown", reply_markup=admin_panel_markup())
 
 @bot.message_handler(commands=['debug_admin'])
 def debug_admin(m):
-    """Debug command to check admin status"""
     user_id = m.from_user.id
     is_admin = user_is_admin(user_id)
     bot.send_message(m.chat.id, 
@@ -444,6 +413,67 @@ def deposit_start(m):
             "Please transfer and then upload your payment receipt in this chat (photo or document). I'll ask you to enter the amount you paid and then forward the receipt to admins for approval."
         )
     bot.send_message(m.chat.id, txt, parse_mode="Markdown", reply_markup=main_menu_markup_for(m.from_user.id))
+
+# FIXED: Receipt handler - accepts receipts from any user
+@bot.message_handler(content_types=['photo', 'document'])
+def handle_receipt(m):
+    ensure_user(m.from_user)
+    
+    # Check if user already has a pending deposit
+    pending_deposit = db_execute("SELECT id, status FROM deposits WHERE user_id = ? AND status IN ('awaiting_amount', 'pending')", (m.from_user.id,), fetchone=True)
+    
+    if pending_deposit:
+        bot.reply_to(m, "❌ You already have a deposit request pending approval. Please wait for admin to process your current request.")
+        return
+    
+    # Accept receipts from any user who sends photo/document
+    file_id = None
+    content_type = m.content_type
+    if content_type == 'photo':
+        file_id = m.photo[-1].file_id
+    elif content_type == 'document':
+        file_id = m.document.file_id
+    else:
+        bot.reply_to(m, "Please send a photo or document as the receipt.")
+        return
+
+    deposit_id = insert_deposit(m.from_user.id, file_id)
+    create_pending_action(m.from_user.id, "awaiting_deposit_amount", deposit_id)
+
+    # Ask user to confirm amount
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(f"₦{JOIN_FEE:,}", callback_data=f"set_deposit_amount:{deposit_id}:{JOIN_FEE}"))
+    markup.add(types.InlineKeyboardButton("Other amount", callback_data=f"set_deposit_amount:{deposit_id}:other"))
+    markup.add(types.InlineKeyboardButton("Cancel", callback_data=f"cancel_deposit:{deposit_id}"))
+
+    bot.reply_to(m, "✅ Receipt received. Please confirm the amount you paid (tap a quick amount or choose Other to type it).", reply_markup=markup)
+
+def forward_deposit_to_admin(deposit_id):
+    deposit = db_execute("SELECT id, user_id, amount, status, receipt_file_id, created_at FROM deposits WHERE id = ?", (deposit_id,), fetchone=True)
+    if not deposit:
+        return
+    uid = deposit[1]
+    amount = deposit[2] or JOIN_FEE
+    status = deposit[3]
+    file_id = deposit[4]
+    created = datetime.datetime.fromtimestamp(deposit[5]).strftime("%Y-%m-%d %H:%M")
+    caption = (
+        f"📥 New deposit (pending verification)\n\n"
+        f"Deposit ID: {deposit_id}\nUser ID: {uid}\nAmount: ₦{amount:,}\nStatus: {status}\nUploaded At: {created}\n\n"
+        "Approve or Reject using the buttons below."
+    )
+    # Forward to all admins
+    for aid in ADMIN_IDS:
+        try:
+            try:
+                bot.send_photo(aid, file_id, caption=caption, reply_markup=deposit_approve_buttons(deposit_id, uid))
+            except Exception:
+                bot.send_document(aid, file_id, caption=caption, reply_markup=deposit_approve_buttons(deposit_id, uid))
+        except Exception:
+            try:
+                bot.send_message(aid, caption, reply_markup=deposit_approve_buttons(deposit_id, uid))
+            except:
+                pass
 
 @bot.message_handler(regexp="^⭐ VIP Upgrade$")
 def vip_upgrade(m):
@@ -590,7 +620,6 @@ def cb_approve_deposit(call: types.CallbackQuery):
 
         bot.send_message(user_id, "✅ Your payment has been approved by admin. Your account is now registered — you can now earn using referrals, spins, and request withdrawals.", reply_markup=main_menu_markup_for(user_id))
         bot.answer_callback_query(call.id, "Deposit approved.")
-        # edit the message where admin clicked to remove buttons (best-effort)
         try:
             bot.edit_message_reply_markup(call.from_user.id, call.message.message_id, reply_markup=None)
         except:
@@ -686,11 +715,9 @@ def cb_spin(call: types.CallbackQuery):
             bot.send_message(call.from_user.id, f"🎉 You won ₦{amount:,}! It has been added to your balance.")
         bot.answer_callback_query(call.id, "Extra spin processed.")
 
-# MODIFIED: Withdrawal approval now requires receipt upload first
+# Withdrawal approval handlers
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("approve_withdraw", "reject_withdraw", "upload_withdraw_receipt")))
 def cb_withdraw_admin(call: types.CallbackQuery):
-    print(f"Withdrawal callback received: {call.data} from user {call.from_user.id}")
-    
     if not user_is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "❌ Unauthorized")
         return
@@ -709,10 +736,7 @@ def cb_withdraw_admin(call: types.CallbackQuery):
         bot.answer_callback_query(call.id, "❌ Withdrawal not found.")
         return
     
-    print(f"Processing {action} for withdrawal {withdraw_id}, status: {wd[3]}")
-    
     if action == "approve_withdraw":
-        # REMOVED: No longer allow direct approval without receipt
         bot.answer_callback_query(call.id, "❌ Please upload payment receipt first using 'Upload Receipt' button.")
         
     elif action == "reject_withdraw":
@@ -729,17 +753,11 @@ def cb_withdraw_admin(call: types.CallbackQuery):
         
         bot.answer_callback_query(call.id, "✅ Withdrawal rejected.")
         
-        # Update the message to remove buttons
         try:
             bot.edit_message_reply_markup(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
                 reply_markup=None
-            )
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=f"❌ {call.message.text}\n\nStatus: REJECTED by admin"
             )
         except Exception as e:
             print(f"Could not update message: {e}")
@@ -749,11 +767,9 @@ def cb_withdraw_admin(call: types.CallbackQuery):
             bot.answer_callback_query(call.id, "❌ Already processed.")
             return
         
-        # Create pending action for admin to upload receipt
         create_pending_action(call.from_user.id, "admin_upload_withdraw_receipt", str(withdraw_id))
         bot.answer_callback_query(call.id, "📤 Please upload the payment receipt (photo or document).")
         
-        # Send instruction message
         bot.send_message(
             call.from_user.id,
             f"📤 *Upload Payment Receipt*\n\n"
@@ -762,7 +778,7 @@ def cb_withdraw_admin(call: types.CallbackQuery):
             parse_mode="Markdown"
         )
 
-# Handle admin receipt upload for withdrawals - NOW APPROVES AUTOMATICALLY AFTER RECEIPT UPLOAD
+# Handle admin receipt upload for withdrawals
 @bot.message_handler(content_types=['photo', 'document'], func=lambda m: get_pending_action(m.from_user.id) and get_pending_action(m.from_user.id)[2] == "admin_upload_withdraw_receipt")
 def handle_admin_withdraw_receipt(m):
     if not user_is_admin(m.from_user.id):
@@ -779,7 +795,6 @@ def handle_admin_withdraw_receipt(m):
         clear_pending_action(m.from_user.id)
         return
     
-    # Get file ID
     file_id = None
     file_type = None
     if m.content_type == 'photo':
@@ -793,7 +808,6 @@ def handle_admin_withdraw_receipt(m):
         bot.reply_to(m, "❌ Please send a photo or document as the receipt.")
         return
     
-    # Get withdrawal details first
     wd = db_execute("SELECT user_id, amount, status FROM withdrawals WHERE id = ?", (withdraw_id,), fetchone=True)
     if not wd:
         bot.send_message(m.chat.id, "❌ Withdrawal not found.")
@@ -809,7 +823,6 @@ def handle_admin_withdraw_receipt(m):
         clear_pending_action(m.from_user.id)
         return
     
-    # Check user balance before processing
     user_row = get_user_row(user_id)
     if not user_row:
         bot.send_message(m.chat.id, "❌ User not found.")
@@ -821,12 +834,10 @@ def handle_admin_withdraw_receipt(m):
         clear_pending_action(m.from_user.id)
         return
     
-    # Update withdrawal with receipt, deduct balance, and mark as completed
     db_execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id), commit=True)
     db_execute("UPDATE withdrawals SET status = 'completed', admin_receipt_file_id = ?, processed_at = ? WHERE id = ?", 
                (file_id, now_ts(), withdraw_id), commit=True)
     
-    # Send receipt to user
     try:
         if file_type == 'photo':
             bot.send_photo(
@@ -855,7 +866,6 @@ def handle_admin_withdraw_receipt(m):
         print(f"Could not notify user: {e}")
         bot.send_message(m.chat.id, f"✅ Receipt uploaded but could not notify user: {e}")
     
-    # Notify admin
     bot.send_message(
         m.chat.id,
         f"✅ *Withdrawal Processed Successfully!*\n\n"
@@ -865,18 +875,6 @@ def handle_admin_withdraw_receipt(m):
         f"Status: Completed ✅",
         parse_mode="Markdown"
     )
-    
-    # Try to update the original admin message
-    try:
-        # Find the original withdrawal notification message and update it
-        bot.edit_message_text(
-            chat_id=m.chat.id,
-            message_id=m.message_id - 1,  # Try the previous message
-            text=f"✅ *Withdrawal COMPLETED*\n\nWithdrawal ID: {withdraw_id}\nAmount: ₦{amount:,}\nStatus: Paid with receipt ✅",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        print(f"Could not update original message: {e}")
     
     clear_pending_action(m.from_user.id)
 
@@ -898,7 +896,6 @@ def admin_callbacks(call: types.CallbackQuery):
         for r in rows:
             txt += f"ID: {r[0]} — {r[2]} (@{r[1]}) — ₦{r[3]:,} — Registered: {'Yes' if r[4] else 'No'} — VIP: {'Yes' if r[5] else 'No'}\n"
             
-        # Split long messages
         if len(txt) > 4000:
             parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
             for part in parts:
@@ -980,16 +977,14 @@ def admin_callbacks(call: types.CallbackQuery):
     else:
         bot.answer_callback_query(call.id, "Unknown admin command.")
 
-# FALLBACK HANDLER - MUST BE LAST
+# FALLBACK HANDLER
 @bot.message_handler(func=lambda m: True)
 def fallback(m):
     ensure_user(m.from_user)
-    # Check if this is a command that should be handled
     if m.text and m.text.startswith('/'):
         bot.send_message(m.chat.id, "❌ Unknown command. Use the menu buttons below.", reply_markup=main_menu_markup_for(m.from_user.id))
         return
         
-    # Check for pending actions first
     pending = get_pending_action(m.from_user.id)
     if pending:
         action = pending[2]
@@ -1064,7 +1059,6 @@ def fallback(m):
             send_to_all_admins(txt, reply_markup=withdraw_approve_buttons(wid, m.from_user.id))
             return
     
-    # Default fallback
     txt = (
         "I didn't understand that. Use the menu below.\n\n"
         "Main commands are available in the buttons.\n"
@@ -1073,115 +1067,8 @@ def fallback(m):
     )
     bot.send_message(m.chat.id, txt, reply_markup=main_menu_markup_for(m.from_user.id))
 
-# ---------- ADMIN PANEL (inline) ----------
-@bot.message_handler(commands=['adminpanel'])
-def admin_panel(m):
-    if not user_is_admin(m.from_user.id):
-        bot.send_message(m.chat.id, "Unauthorized.")
-        return
-    bot.send_message(m.chat.id, "🛠 Admin Panel (inline controls):", reply_markup=admin_panel_markup())
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_"))
-def admin_callbacks(call: types.CallbackQuery):
-    if not user_is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "Unauthorized")
-        return
-    cmd = call.data
-    if cmd == "admin_members":
-        rows = db_execute("SELECT user_id, username, first_name, balance, is_registered, is_vip FROM users", fetchall=True)
-        if not rows:
-            bot.send_message(call.from_user.id, "No members found.")
-            bot.answer_callback_query(call.id, "No members")
-            return
-            
-        txt = "👥 All Members\n\n"
-        for r in rows:
-            txt += f"ID: {r[0]} — {r[2]} (@{r[1]}) — ₦{r[3]:,} — Registered: {'Yes' if r[4] else 'No'} — VIP: {'Yes' if r[5] else 'No'}\n"
-            
-        # Split long messages
-        if len(txt) > 4000:
-            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
-            for part in parts:
-                bot.send_message(call.from_user.id, part)
-        else:
-            bot.send_message(call.from_user.id, txt)
-        bot.answer_callback_query(call.id, "Members listed.")
-        
-    elif cmd == "admin_deposits":
-        rows = db_execute("SELECT id, user_id, amount, status, created_at FROM deposits ORDER BY created_at DESC LIMIT 50", fetchall=True)
-        if not rows:
-            bot.send_message(call.from_user.id, "No deposits found.")
-            bot.answer_callback_query(call.id, "No deposits")
-            return
-            
-        txt = "📥 Deposits (latest 50)\n\n"
-        for r in rows:
-            created = datetime.datetime.fromtimestamp(r[4]).strftime("%Y-%m-%d %H:%M") if r[4] else "N/A"
-            amt = r[2] if r[2] is not None else "(not set)"
-            txt += f"ID:{r[0]} User:{r[1]} Amount:{amt} Status:{r[3]} At:{created}\n"
-            
-        if len(txt) > 4000:
-            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
-            for part in parts:
-                bot.send_message(call.from_user.id, part)
-        else:
-            bot.send_message(call.from_user.id, txt)
-        bot.answer_callback_query(call.id, "Deposits listed.")
-        
-    elif cmd == "admin_withdrawals":
-        rows = db_execute("SELECT id, user_id, amount, status, account_details, created_at FROM withdrawals ORDER BY created_at DESC LIMIT 50", fetchall=True)
-        if not rows:
-            bot.send_message(call.from_user.id, "No withdrawals found.")
-            bot.answer_callback_query(call.id, "No withdrawals")
-            return
-            
-        txt = "💸 Withdrawals (latest 50)\n\n"
-        for r in rows:
-            created = datetime.datetime.fromtimestamp(r[5]).strftime("%Y-%m-%d %H:%M") if r[5] else "N/A"
-            account_preview = r[4][:50] + "..." if r[4] and len(r[4]) > 50 else (r[4] or "No details")
-            txt += f"ID:{r[0]} User:{r[1]} Amount:₦{r[2]:,} Status:{r[3]} Account:{account_preview} At:{created}\n"
-            
-        if len(txt) > 4000:
-            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
-            for part in parts:
-                bot.send_message(call.from_user.id, part)
-        else:
-            bot.send_message(call.from_user.id, txt)
-        bot.answer_callback_query(call.id, "Withdrawals listed.")
-        
-    elif cmd == "admin_referrals":
-        rows = db_execute("SELECT referrer_id, referred_id, bonus_amount, created_at FROM referrals ORDER BY created_at DESC LIMIT 100", fetchall=True)
-        if not rows:
-            bot.send_message(call.from_user.id, "No referrals found.")
-            bot.answer_callback_query(call.id, "No referrals")
-            return
-            
-        txt = "🔁 Referrals (latest 100)\n\n"
-        for r in rows:
-            created = datetime.datetime.fromtimestamp(r[3]).strftime("%Y-%m-%d %H:%M") if r[3] else "N/A"
-            txt += f"Referrer:{r[0]} -> Referred:{r[1]} Bonus:₦{r[2]:,} At:{created}\n"
-            
-        if len(txt) > 4000:
-            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
-            for part in parts:
-                bot.send_message(call.from_user.id, part)
-        else:
-            bot.send_message(call.from_user.id, txt)
-        bot.answer_callback_query(call.id, "Referrals listed.")
-        
-    elif cmd == "admin_add_balance_help":
-        bot.send_message(call.from_user.id, "To add balance use the command:\n/admin_add_balance <user_id> <amount>\nExample:\n/admin_add_balance 123456789 1000")
-        bot.answer_callback_query(call.id, "How-to sent.")
-        
-    elif cmd == "admin_block_help":
-        bot.send_message(call.from_user.id, "To block/unregister a user use the command:\n/admin_block <user_id>\nExample:\n/admin_block 123456789")
-        bot.answer_callback_query(call.id, "How-to sent.")
-        
-    else:
-        bot.answer_callback_query(call.id, "Unknown admin command.")
 # ---------- START ----------
 if __name__ == "__main__":
-    # Safety check: ensure BOT_TOKEN and ADMIN_IDS are set
     if not BOT_TOKEN or not ADMIN_IDS or len(ADMIN_IDS) < 1:
         print("Please set BOT_TOKEN and ADMIN_IDS in the script before running.")
         exit(1)
