@@ -10,7 +10,7 @@ import psycopg2
 # ---------- CONFIG ----------
 BOT_TOKEN = "8478769265:AAFk0HRmbbNwulr1DEu7-QYojsQ4yBv3kaA"
 ADMIN_IDS = [7753547171, 8303629661]
-DB_PATH = '/data/earning_bot.db'  # Permanent storage
+DB_PATH = "earning_bot.db"
 JOIN_FEE = 2000
 REFERRAL_BONUS = 1000
 VIP_UPGRADE_COST = 5000
