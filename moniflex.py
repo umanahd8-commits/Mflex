@@ -484,3 +484,25 @@ if __name__ == "__main__":
             print(f"Bot crashed with error: {e}")
             print("Restarting in 5 seconds...")
             time.sleep(5)
+# Add this at the very end of your file (replace existing if __name__ block)
+if __name__ == "__main__":
+    print("🚀 Starting Telegram Bot...")
+    
+    # Test database connection first
+    try:
+        print("📊 Testing database connection...")
+        init_db()
+        print("✅ Database connected successfully!")
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        exit(1)
+    
+    # Start bot with error recovery
+    while True:
+        try:
+            print("🤖 Starting bot polling...")
+            bot.polling(none_stop=True, timeout=60)
+        except Exception as e:
+            print(f"❌ Bot crashed: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)
