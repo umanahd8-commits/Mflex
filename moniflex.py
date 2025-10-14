@@ -1082,3 +1082,28 @@ if __name__ == "__main__":
     init_db()
     print("Bot is running...")
     bot.infinity_polling()
+# ---------- START (WITH DEBUGGING) ----------
+if __name__ == "__main__":
+    print("🚀 Starting bot...")
+    
+    # Debug: Check if token is available
+    token = os.environ.get("BOT_TOKEN") or "8478769265:AAFk0HRmbbNwulr1DEu7-QYojsQ4yBv3kaA"
+    print(f"🔑 Token available: {'Yes' if token else 'No'}")
+    print(f"🔑 Token starts with: {token[:10]}...")
+    
+    # Debug: Check database connection
+    try:
+        init_db()
+        print("✅ Database connected successfully!")
+    except Exception as e:
+        print(f"❌ Database error: {e}")
+    
+    # Start bot with error handling
+    while True:
+        try:
+            print("🤖 Starting bot polling...")
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"❌ Bot error: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)
