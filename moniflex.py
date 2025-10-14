@@ -6,7 +6,7 @@ import random
 import os
 import psycopg2
 
-# ---------- CONFIG ----------
+# ---------- CONFIG -----------
 BOT_TOKEN = "8478769265:AAHEXljntFvm3Wxw7uO3-Bgt7ZOJtc_fkSM"
 ADMIN_IDS = [7753547171, 8303629661]
 JOIN_FEE = 2000
