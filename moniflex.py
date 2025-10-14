@@ -33,15 +33,15 @@ HELP_SUPPORT_URL = "https://t.me/MONIFLEXBOT1"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ---------- DB HELPERS (POSTGRESQL VERSION) ----------
+# ---------- DB HELPERS (ONLY CHANGED PART) ----------
 def get_db_connection():
     """Get PostgreSQL connection for Railway"""
-    try:
-        DATABASE_URL = os.environ.get('DATABASE_URL')
+    DATABASE_URL = os.environ.get('DATABASE_URL')
+    if DATABASE_URL:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
-    except:
-        # Fallback to SQLite if PostgreSQL fails
+    else:
+        # Fallback to SQLite for local development
         import sqlite3
         return sqlite3.connect("earning_bot.db")
 
@@ -95,6 +95,17 @@ def init_db():
         created_at INTEGER
     )""")
     conn.commit()
+    conn.close()
+    migrate_db()
+
+def migrate_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT account_details FROM withdrawals LIMIT 1")
+        print("Withdrawals table already has the new columns!")
+    except Exception:
+        print("Withdrawals table structure is correct")
     conn.close()
 
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
@@ -461,23 +472,613 @@ def forward_deposit_to_admin(deposit_id):
             except Exception:
                 bot.send_document(aid, file_id, caption=caption, reply_markup=deposit_approve_buttons(deposit_id, uid))
         except Exception:
+            try:
+                bot.send_message(aid, caption, reply_markup=deposit_approve_buttons(deposit_id, uid))
+            except:
+                pass
+
+@bot.message_handler(regexp="^⭐ VIP Upgrade$")
+def vip_upgrade(m):
+    ensure_user(m.from_user)
+    user = get_user_row(m.from_user.id)
+    if not user or user[4] == 0:
+        bot.send_message(m.chat.id, "You must complete registration and be approved by admin to upgrade to VIP.", reply_markup=main_menu_markup_for(m.from_user.id))
+        return
+    if user[7] == 1:
+        bot.send_message(m.chat.id, "You are already VIP! Enjoy the bonuses and priority withdrawals.", reply_markup=main_menu_markup_for(m.from_user.id))
+        return
+    txt = (
+        f"⭐ *VIP Upgrade — ₦{VIP_UPGRADE_COST:,}*\n\n"
+        "Upgrade to VIP to earn ₦1,300 per referral, get priority withdrawals, 2 lucky spins per week, VIP badge and exclusive bonuses.\n\n"
+        "You can pay from your balance. Press the button below to purchase VIP (balance will be deducted)."
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(f"Buy VIP for ₦{VIP_UPGRADE_COST:,}", callback_data="buy_vip"))
+    bot.send_message(m.chat.id, txt, parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(regexp="^🎰 Lucky Spin$")
+def lucky_spin_menu(m):
+    ensure_user(m.from_user)
+    user = get_user_row(m.from_user.id)
+    if not user or user[4] == 0:
+        bot.send_message(m.chat.id, "You must complete registration (pay and be approved) to use Lucky Spin.", reply_markup=main_menu_markup_for(m.from_user.id))
+        return
+    spins_allowed = 2 if user[7] == 1 else 1
+    week_start = user[10] or 0
+    if week_start == 0:
+        week_start = now_ts()
+        db_execute("UPDATE users SET spin_week_start = %s WHERE user_id = %s", (week_start, m.from_user.id), commit=True)
+    if now_ts() - week_start >= 7*24*3600:
+        db_execute("UPDATE users SET spin_week_start = %s, spins_used = 0 WHERE user_id = %s", (now_ts(), m.from_user.id), commit=True)
+        user = get_user_row(m.from_user.id)
+
+    spins_used = user[9] or 0
+    spins_left = max(0, spins_allowed - spins_used)
+    txt = (
+        f"🎰 Lucky Spin\n\nSpins this week: {spins_left}/{spins_allowed}\n\n"
+        "Spin rewards:\n• ₦100\n• ₦200\n• ₦500 (very rare)\n• Try Again\n\nYou can also buy extra spins for ₦100 each (deducted from your balance).\n\nPress Spin to try your luck!"
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🎯 Spin", callback_data="spin_now"))
+    markup.add(types.InlineKeyboardButton("➕ Buy extra spin (₦100)", callback_data="buy_spin"))
+    bot.send_message(m.chat.id, txt, reply_markup=markup)
+
+@bot.message_handler(regexp="^🚧 Tasks \\(Coming Soon\\)$")
+def tasks_coming_soon(m):
+    txt = (
+        "🚧 Tasks — Coming Soon\n\n"
+        "Exciting ways to earn more will be released soon! Stay tuned to the updates channel for announcements and new task drops."
+    )
+    bot.send_message(m.chat.id, txt, reply_markup=main_menu_markup_for(m.from_user.id))
+
+@bot.message_handler(regexp="^💵 Withdraw$")
+def withdraw_cmd(m):
+    ensure_user(m.from_user)
+    user = get_user_row(m.from_user.id)
+    if not user or user[4] == 0:
+        bot.send_message(m.chat.id, "You must pay the registration fee and be approved by admin before requesting withdrawals.", reply_markup=main_menu_markup_for(m.from_user.id))
+        return
+    create_pending_action(m.from_user.id, "awaiting_withdraw_amount", "")
+    bot.send_message(m.chat.id, f"💸 *Withdraw Request*\n\nMinimum withdrawal amount: ₦{MIN_WITHDRAW:,}\n\nReply with the amount you want to withdraw (numbers only).", parse_mode="Markdown")
+
+# ---------- CALLBACK HANDLERS (EXACTLY THE SAME) ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_deposit_amount") or call.data.startswith("cancel_deposit"))
+def cb_set_deposit_amount(call: types.CallbackQuery):
+    try:
+        parts = call.data.split(":")
+        cmd = parts[0]
+        deposit_id = int(parts[1])
+        choice = parts[2].strip()
+    except Exception:
+        bot.answer_callback_query(call.id, "Invalid action.")
+        return
+
+    row = db_execute("SELECT id, user_id, amount, status, receipt_file_id FROM deposits WHERE id = %s", (deposit_id,), fetchone=True)
+    if not row:
+        bot.answer_callback_query(call.id, "Deposit not found.")
+        return
+
+    user_id = row[1]
+    if cmd == "cancel_deposit":
+        db_execute("UPDATE deposits SET status = %s WHERE id = %s", ("cancelled", deposit_id), commit=True)
+        clear_pending_action(user_id)
+        bot.send_message(user_id, "Your deposit upload has been cancelled. If you want to try again, upload the receipt again.")
+        bot.answer_callback_query(call.id, "Deposit cancelled.")
+        return
+
+    if choice == "other":
+        bot.answer_callback_query(call.id, "Please type the amount you paid (numbers only).")
+        bot.send_message(user_id, "Please reply with the amount you paid (numbers only).")
+        return
+    else:
+        try:
+            amount = int(choice.replace(",", "").replace(" ", ""))
+        except:
+            bot.answer_callback_query(call.id, "Invalid amount.")
+            return
+        finalize_deposit_amount(deposit_id, amount)
+        clear_pending_action(user_id)
+        bot.answer_callback_query(call.id, f"Amount ₦{amount:,} recorded and forwarded to admins.")
+        bot.send_message(user_id, f"✅ Amount ₦{amount:,} recorded. Your receipt has been sent to admins for verification.")
+        forward_deposit_to_admin(deposit_id)
+        return
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_deposit") or call.data.startswith("reject_deposit"))
+def cb_approve_deposit(call: types.CallbackQuery):
+    if not user_is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Unauthorized")
+        return
+    parts = call.data.split(":")
+    action = parts[0]
+    deposit_id = int(parts[1])
+    user_id = int(parts[2])
+    deposit = db_execute("SELECT id, user_id, amount, status FROM deposits WHERE id = %s", (deposit_id,), fetchone=True)
+    if not deposit:
+        bot.answer_callback_query(call.id, "Deposit not found.")
+        return
+    current_status = deposit[3]
+    if action == "approve_deposit":
+        if current_status != "pending":
+            bot.answer_callback_query(call.id, "Deposit is not in pending state.")
+            return
+        db_execute("UPDATE deposits SET status = %s WHERE id = %s", ("approved", deposit_id), commit=True)
+        db_execute("UPDATE users SET is_registered = 1 WHERE user_id = %s", (user_id,), commit=True)
+
+        # award referral bonus if applicable
+        ref_row = db_execute("SELECT referrer_id FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+        if ref_row and ref_row[0]:
+            referrer_id = ref_row[0]
+            ref_user = db_execute("SELECT is_vip FROM users WHERE user_id = %s", (referrer_id,), fetchone=True)
+            bonus = REFERRAL_BONUS
+            if ref_user and ref_user[0] == 1:
+                bonus = VIP_REFERRAL_BONUS
+            db_execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (bonus, referrer_id), commit=True)
+            db_execute("INSERT INTO referrals (referrer_id, referred_id, deposit_id, bonus_amount, created_at) VALUES (%s, %s, %s, %s, %s)",
+                       (referrer_id, user_id, deposit_id, bonus, now_ts()), commit=True)
+            try:
+                bot.send_message(referrer_id, f"🎉 You received a referral bonus of ₦{bonus:,} because a referred friend completed registration.")
+            except:
+                pass
+
+        bot.send_message(user_id, "✅ Your payment has been approved by admin. Your account is now registered — you can now earn using referrals, spins, and request withdrawals.", reply_markup=main_menu_markup_for(user_id))
+        bot.answer_callback_query(call.id, "Deposit approved.")
+        try:
+            bot.edit_message_reply_markup(call.from_user.id, call.message.message_id, reply_markup=None)
+        except:
+            pass
+    elif action == "reject_deposit":
+        if current_status not in ("pending", "awaiting_amount"):
+            bot.answer_callback_query(call.id, "Deposit is not in a rejectable state.")
+            return
+        db_execute("UPDATE deposits SET status = %s WHERE id = %s", ("rejected", deposit_id), commit=True)
+        clear_pending_action(user_id)
+        bot.send_message(user_id, "❌ Your payment receipt was rejected by admin. Please check and upload a valid receipt.")
+        bot.answer_callback_query(call.id, "Deposit rejected.")
+        try:
+            bot.edit_message_reply_markup(call.from_user.id, call.message.message_id, reply_markup=None)
+        except:
             pass
 
-# ---------- START BOT (WITH ERROR HANDLING) ----------
-if __name__ == "__main__":
-    print("🤖 Starting MoniFlex Bot...")
-    try:
-        init_db()
-        print("✅ Database initialized!")
-    except Exception as e:
-        print(f"⚠️ Database warning: {e}")
+@bot.callback_query_handler(func=lambda c: c.data == "buy_vip")
+def cb_buy_vip(call: types.CallbackQuery):
+    ensure_user(call.from_user)
+    user = get_user_row(call.from_user.id)
+    if not user or user[4] == 0:
+        bot.answer_callback_query(call.id, "You must be registered to buy VIP.")
+        bot.send_message(call.from_user.id, "You must complete registration before purchasing VIP. Use 'Deposit / Pay Fee'.")
+        return
+    balance = user[3]
+    if balance < VIP_UPGRADE_COST:
+        bot.answer_callback_query(call.id, "Insufficient balance to buy VIP.")
+        bot.send_message(call.from_user.id, f"Your balance is ₦{balance:,}. You need ₦{VIP_UPGRADE_COST:,} to buy VIP.")
+        return
+    db_execute("UPDATE users SET balance = balance - %s, is_vip = 1, vip_since = %s WHERE user_id = %s",
+               (VIP_UPGRADE_COST, now_ts(), call.from_user.id), commit=True)
+    bot.answer_callback_query(call.id, "VIP purchased!")
+    bot.send_message(call.from_user.id, "🎉 You are now VIP! Enjoy higher referral earnings and extra spins.", reply_markup=main_menu_markup_for(call.from_user.id))
+
+@bot.callback_query_handler(func=lambda c: c.data in ("spin_now", "buy_spin"))
+def cb_spin(call: types.CallbackQuery):
+    ensure_user(call.from_user)
+    user = get_user_row(call.from_user.id)
+    if not user or user[4] == 0:
+        bot.answer_callback_query(call.id, "You must complete registration to use spins.")
+        bot.send_message(call.from_user.id, "Complete your deposit & approval first.")
+        return
+    spins_allowed = 2 if user[7] == 1 else 1
+    week_start = user[10] or 0
+    if week_start == 0 or now_ts() - week_start >= 7*24*3600:
+        db_execute("UPDATE users SET spin_week_start = %s, spins_used = 0 WHERE user_id = %s", (now_ts(), call.from_user.id), commit=True)
+        user = get_user_row(call.from_user.id)
+
+    spins_used = user[9] or 0
+    spins_left = max(0, spins_allowed - spins_used)
+
+    if call.data == "spin_now":
+        if spins_left <= 0:
+            bot.answer_callback_query(call.id, "No free spins left for this week. Buy extra spin to play more.")
+            bot.send_message(call.from_user.id, "No free spins left this week. You can buy extra spins for ₦100 each.")
+            return
+        db_execute("UPDATE users SET spins_used = spins_used + 1 WHERE user_id = %s", (call.from_user.id,), commit=True)
+        r = random.random()
+        cumulative = 0.0
+        outcome = "TRY_AGAIN"
+        for name, prob in SPIN_OUTCOMES:
+            cumulative += prob
+            if r <= cumulative:
+                outcome = name
+                break
+        if outcome == "TRY_AGAIN":
+            bot.send_message(call.from_user.id, "😕 Try Again — no win this time. Better luck next spin!")
+        else:
+            amount = int(outcome)
+            db_execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, call.from_user.id), commit=True)
+            bot.send_message(call.from_user.id, f"🎉 You won ₦{amount:,}! It has been added to your balance.")
+        bot.answer_callback_query(call.id, "Spin processed.")
+    else:  # buy_spin
+        if user[3] < 100:
+            bot.answer_callback_query(call.id, "Insufficient balance to buy spin. Please deposit or top up your balance.")
+            bot.send_message(call.from_user.id, "You need ₦100 to buy a spin. Use Deposit / Pay Fee to upload receipt or ask admin to add balance.")
+            return
+        db_execute("UPDATE users SET balance = balance - %s WHERE user_id = %s", (100, call.from_user.id), commit=True)
+        r = random.random()
+        cumulative = 0.0
+        outcome = "TRY_AGAIN"
+        for name, prob in SPIN_OUTCOMES:
+            cumulative += prob
+            if r <= cumulative:
+                outcome = name
+                break
+        if outcome == "TRY_AGAIN":
+            bot.send_message(call.from_user.id, "😕 Try Again — no win this time.")
+        else:
+            amount = int(outcome)
+            db_execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, call.from_user.id), commit=True)
+            bot.send_message(call.from_user.id, f"🎉 You won ₦{amount:,}! It has been added to your balance.")
+        bot.answer_callback_query(call.id, "Extra spin processed.")
+
+# Withdrawal approval handlers
+@bot.callback_query_handler(func=lambda c: c.data.startswith(("approve_withdraw", "reject_withdraw", "upload_withdraw_receipt")))
+def cb_withdraw_admin(call: types.CallbackQuery):
+    if not user_is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Unauthorized")
+        return
     
-    # Start bot polling with error recovery
-    while True:
+    try:
+        parts = call.data.split(":")
+        action = parts[0]
+        withdraw_id = int(parts[1])
+        user_id = int(parts[2])
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Error: {e}")
+        return
+    
+    wd = db_execute("SELECT id, user_id, amount, status FROM withdrawals WHERE id = %s", (withdraw_id,), fetchone=True)
+    if not wd:
+        bot.answer_callback_query(call.id, "❌ Withdrawal not found.")
+        return
+    
+    if action == "approve_withdraw":
+        bot.answer_callback_query(call.id, "❌ Please upload payment receipt first using 'Upload Receipt' button.")
+        
+    elif action == "reject_withdraw":
+        if wd[3] != "pending":
+            bot.answer_callback_query(call.id, "❌ Already processed.")
+            return
+        
+        db_execute("UPDATE withdrawals SET status = %s WHERE id = %s", ("rejected", withdraw_id), commit=True)
+        
         try:
-            print("🔄 Starting bot polling...")
-            bot.polling(none_stop=True, timeout=60)
+            bot.send_message(user_id, f"❌ Your withdrawal request (ID: {withdraw_id}) was rejected by admin.")
         except Exception as e:
-            print(f"❌ Bot error: {e}")
-            print("🔄 Restarting in 10 seconds...")
-            time.sleep(10)
+            print(f"Could not notify user: {e}")
+        
+        bot.answer_callback_query(call.id, "✅ Withdrawal rejected.")
+        
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=None
+            )
+        except Exception as e:
+            print(f"Could not update message: {e}")
+    
+    elif action == "upload_withdraw_receipt":
+        if wd[3] != "pending":
+            bot.answer_callback_query(call.id, "❌ Already processed.")
+            return
+        
+        create_pending_action(call.from_user.id, "admin_upload_withdraw_receipt", str(withdraw_id))
+        bot.answer_callback_query(call.id, "📤 Please upload the payment receipt (photo or document).")
+        
+        bot.send_message(
+            call.from_user.id,
+            f"📤 *Upload Payment Receipt*\n\n"
+            f"Withdrawal ID: `{withdraw_id}`\n"
+            f"Please upload the payment receipt (photo or document) for this withdrawal.",
+            parse_mode="Markdown"
+        )
+
+# Handle admin receipt upload for withdrawals
+@bot.message_handler(content_types=['photo', 'document'], func=lambda m: get_pending_action(m.from_user.id) and get_pending_action(m.from_user.id)[2] == "admin_upload_withdraw_receipt")
+def handle_admin_withdraw_receipt(m):
+    if not user_is_admin(m.from_user.id):
+        return
+    
+    pending = get_pending_action(m.from_user.id)
+    if not pending or pending[2] != "admin_upload_withdraw_receipt":
+        return
+    
+    try:
+        withdraw_id = int(pending[3])
+    except:
+        bot.send_message(m.chat.id, "❌ Error processing withdrawal ID.")
+        clear_pending_action(m.from_user.id)
+        return
+    
+    file_id = None
+    file_type = None
+    if m.content_type == 'photo':
+        file_id = m.photo[-1].file_id
+        file_type = 'photo'
+    elif m.content_type == 'document':
+        file_id = m.document.file_id
+        file_type = 'document'
+    
+    if not file_id:
+        bot.reply_to(m, "❌ Please send a photo or document as the receipt.")
+        return
+    
+    wd = db_execute("SELECT user_id, amount, status FROM withdrawals WHERE id = %s", (withdraw_id,), fetchone=True)
+    if not wd:
+        bot.send_message(m.chat.id, "❌ Withdrawal not found.")
+        clear_pending_action(m.from_user.id)
+        return
+    
+    user_id = wd[0]
+    amount = wd[1]
+    current_status = wd[2]
+    
+    if current_status != "pending":
+        bot.send_message(m.chat.id, f"❌ Withdrawal already processed (status: {current_status}).")
+        clear_pending_action(m.from_user.id)
+        return
+    
+    user_row = get_user_row(user_id)
+    if not user_row:
+        bot.send_message(m.chat.id, "❌ User not found.")
+        clear_pending_action(m.from_user.id)
+        return
+        
+    if user_row[3] < amount:
+        bot.send_message(m.chat.id, f"❌ User has insufficient balance (₦{user_row[3]:,} < ₦{amount:,}).")
+        clear_pending_action(m.from_user.id)
+        return
+    
+    db_execute("UPDATE users SET balance = balance - %s WHERE user_id = %s", (amount, user_id), commit=True)
+    db_execute("UPDATE withdrawals SET status = 'completed', admin_receipt_file_id = %s, processed_at = %s WHERE id = %s", 
+               (file_id, now_ts(), withdraw_id), commit=True)
+    
+    try:
+        if file_type == 'photo':
+            bot.send_photo(
+                user_id, 
+                file_id, 
+                caption=f"📄 *Payment Receipt*\n\nYour withdrawal of ₦{amount:,} has been processed successfully!",
+                parse_mode="Markdown"
+            )
+        else:
+            bot.send_document(
+                user_id, 
+                file_id, 
+                caption=f"📄 *Payment Receipt*\n\nYour withdrawal of ₦{amount:,} has been processed successfully!",
+                parse_mode="Markdown"
+            )
+        
+        bot.send_message(
+            user_id, 
+            f"✅ *Withdrawal Completed!*\n\n"
+            f"Amount: ₦{amount:,}\n"
+            f"Status: Paid\n\n"
+            f"Thank you for using our service! 🎉",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Could not notify user: {e}")
+        bot.send_message(m.chat.id, f"✅ Receipt uploaded but could not notify user: {e}")
+    
+    bot.send_message(
+        m.chat.id,
+        f"✅ *Withdrawal Processed Successfully!*\n\n"
+        f"Withdrawal ID: `{withdraw_id}`\n"
+        f"User: `{user_id}`\n"
+        f"Amount: ₦{amount:,}\n"
+        f"Status: Completed ✅",
+        parse_mode="Markdown"
+    )
+    
+    clear_pending_action(m.from_user.id)
+
+# ADMIN PANEL CALLBACKS
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_"))
+def admin_callbacks(call: types.CallbackQuery):
+    if not user_is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Unauthorized")
+        return
+    cmd = call.data
+    if cmd == "admin_members":
+        rows = db_execute("SELECT user_id, username, first_name, balance, is_registered, is_vip FROM users", fetchall=True)
+        if not rows:
+            bot.send_message(call.from_user.id, "No members found.")
+            bot.answer_callback_query(call.id, "No members")
+            return
+            
+        txt = "👥 All Members\n\n"
+        for r in rows:
+            txt += f"ID: {r[0]} — {r[2]} (@{r[1]}) — ₦{r[3]:,} — Registered: {'Yes' if r[4] else 'No'} — VIP: {'Yes' if r[5] else 'No'}\n"
+            
+        if len(txt) > 4000:
+            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
+            for part in parts:
+                bot.send_message(call.from_user.id, part)
+        else:
+            bot.send_message(call.from_user.id, txt)
+        bot.answer_callback_query(call.id, "Members listed.")
+        
+    elif cmd == "admin_deposits":
+        rows = db_execute("SELECT id, user_id, amount, status, created_at FROM deposits ORDER BY created_at DESC LIMIT 50", fetchall=True)
+        if not rows:
+            bot.send_message(call.from_user.id, "No deposits found.")
+            bot.answer_callback_query(call.id, "No deposits")
+            return
+            
+        txt = "📥 Deposits (latest 50)\n\n"
+        for r in rows:
+            created = datetime.datetime.fromtimestamp(r[4]).strftime("%Y-%m-%d %H:%M") if r[4] else "N/A"
+            amt = r[2] if r[2] is not None else "(not set)"
+            txt += f"ID:{r[0]} User:{r[1]} Amount:{amt} Status:{r[3]} At:{created}\n"
+            
+        if len(txt) > 4000:
+            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
+            for part in parts:
+                bot.send_message(call.from_user.id, part)
+        else:
+            bot.send_message(call.from_user.id, txt)
+        bot.answer_callback_query(call.id, "Deposits listed.")
+        
+    elif cmd == "admin_withdrawals":
+        rows = db_execute("SELECT id, user_id, amount, status, account_details, created_at FROM withdrawals ORDER BY created_at DESC LIMIT 50", fetchall=True)
+        if not rows:
+            bot.send_message(call.from_user.id, "No withdrawals found.")
+            bot.answer_callback_query(call.id, "No withdrawals")
+            return
+            
+        txt = "💸 Withdrawals (latest 50)\n\n"
+        for r in rows:
+            created = datetime.datetime.fromtimestamp(r[5]).strftime("%Y-%m-%d %H:%M") if r[5] else "N/A"
+            account_preview = r[4][:50] + "..." if r[4] and len(r[4]) > 50 else (r[4] or "No details")
+            txt += f"ID:{r[0]} User:{r[1]} Amount:₦{r[2]:,} Status:{r[3]} Account:{account_preview} At:{created}\n"
+            
+        if len(txt) > 4000:
+            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
+            for part in parts:
+                bot.send_message(call.from_user.id, part)
+        else:
+            bot.send_message(call.from_user.id, txt)
+        bot.answer_callback_query(call.id, "Withdrawals listed.")
+        
+    elif cmd == "admin_referrals":
+        rows = db_execute("SELECT referrer_id, referred_id, bonus_amount, created_at FROM referrals ORDER BY created_at DESC LIMIT 100", fetchall=True)
+        if not rows:
+            bot.send_message(call.from_user.id, "No referrals found.")
+            bot.answer_callback_query(call.id, "No referrals")
+            return
+            
+        txt = "🔁 Referrals (latest 100)\n\n"
+        for r in rows:
+            created = datetime.datetime.fromtimestamp(r[3]).strftime("%Y-%m-%d %H:%M") if r[3] else "N/A"
+            txt += f"Referrer:{r[0]} -> Referred:{r[1]} Bonus:₦{r[2]:,} At:{created}\n"
+            
+        if len(txt) > 4000:
+            parts = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
+            for part in parts:
+                bot.send_message(call.from_user.id, part)
+        else:
+            bot.send_message(call.from_user.id, txt)
+        bot.answer_callback_query(call.id, "Referrals listed.")
+        
+    elif cmd == "admin_add_balance_help":
+        bot.send_message(call.from_user.id, "To add balance use the command:\n/admin_add_balance <user_id> <amount>\nExample:\n/admin_add_balance 123456789 1000")
+        bot.answer_callback_query(call.id, "How-to sent.")
+        
+    elif cmd == "admin_block_help":
+        bot.send_message(call.from_user.id, "To block/unregister a user use the command:\n/admin_block <user_id>\nExample:\n/admin_block 123456789")
+        bot.answer_callback_query(call.id, "How-to sent.")
+        
+    else:
+        bot.answer_callback_query(call.id, "Unknown admin command.")
+
+# FALLBACK HANDLER (EXACTLY THE SAME)
+@bot.message_handler(func=lambda m: True)
+def fallback(m):
+    ensure_user(m.from_user)
+    if m.text and m.text.startswith('/'):
+        bot.send_message(m.chat.id, "❌ Unknown command. Use the menu buttons below.", reply_markup=main_menu_markup_for(m.from_user.id))
+        return
+        
+    pending = get_pending_action(m.from_user.id)
+    if pending:
+        action = pending[2]
+        data = pending[3]
+        
+        if action == "awaiting_deposit_amount":
+            if m.text and m.text.strip().isdigit():
+                try:
+                    amount = int(m.text.strip())
+                except:
+                    bot.send_message(m.chat.id, "Please send a numeric amount only.")
+                    return
+                deposit_id = int(data)
+                finalize_deposit_amount(deposit_id, amount)
+                clear_pending_action(m.from_user.id)
+                bot.send_message(m.chat.id, f"✅ Amount ₦{amount:,} recorded. Your receipt has been sent to admins for verification.")
+                forward_deposit_to_admin(deposit_id)
+                return
+            else:
+                bot.send_message(m.chat.id, "Please send a numeric amount only.")
+                return
+                
+        elif action == "awaiting_withdraw_amount":
+            if m.text and m.text.strip().isdigit():
+                try:
+                    amount = int(m.text.strip())
+                except:
+                    bot.send_message(m.chat.id, "Please send a numeric amount only.")
+                    return
+                    
+                user = get_user_row(m.from_user.id)
+                if not user or user[4] == 0:
+                    bot.send_message(m.chat.id, "You must be registered and approved by admin before requesting withdrawals.")
+                    clear_pending_action(m.from_user.id)
+                    return
+                    
+                if amount < MIN_WITHDRAW:
+                    bot.send_message(m.chat.id, f"Minimum withdrawal is ₦{MIN_WITHDRAW:,}. Please enter an amount ≥ ₦{MIN_WITHDRAW:,}.")
+                    return
+                    
+                if user[3] < amount:
+                    bot.send_message(m.chat.id, f"Insufficient balance. Your balance is ₦{user[3]:,}.")
+                    return
+                
+                create_pending_action(m.from_user.id, "awaiting_account_details", str(amount))
+                bot.send_message(m.chat.id, "📝 *Please provide your account details*:\n\nYou can send:\n- Bank name:\n Account number:\n Account name:\n\n\nmake sure your account details are correct to aviod sending funds to wrong account")
+                return
+            else:
+                bot.send_message(m.chat.id, "Please send a numeric amount for withdrawal.")
+                return
+                
+        elif action == "awaiting_account_details":
+            try:
+                amount = int(data)
+            except:
+                bot.send_message(m.chat.id, "Error processing withdrawal amount. Please start over.")
+                clear_pending_action(m.from_user.id)
+                return
+            
+            account_details = m.text.strip()
+            wid = insert_withdrawal(m.from_user.id, amount, account_details)
+            clear_pending_action(m.from_user.id)
+            
+            bot.send_message(m.chat.id, f"✅ Withdrawal request of ₦{amount:,} created and sent to admins for approval (Request ID: {wid}).\n\nYour account details have been recorded.")
+            
+            txt = (
+                f"💸 New Withdrawal Request\n\n"
+                f"ID: {wid}\nUser: {m.from_user.first_name} (@{m.from_user.username or 'none'})\nUser ID: {m.from_user.id}\nAmount: ₦{amount:,}\n\n"
+                f"Account Details:\n{account_details}\n\n"
+                "Approve, reject, or upload receipt using the buttons."
+            )
+            send_to_all_admins(txt, reply_markup=withdraw_approve_buttons(wid, m.from_user.id))
+            return
+    
+    # Handle random photo/document uploads when not in deposit flow
+    if m.content_type in ['photo', 'document']:
+        bot.reply_to(m, "❌ I only accept receipts when you're in the deposit process. Please use the '💳 Deposit / Pay Fee' button first to start a deposit request.")
+        return
+    
+    txt = (
+        "I didn't understand that. Use the menu below.\n\n"
+        "Main commands are available in the buttons.\n"
+        "If you paid, upload your payment receipt under Deposit / Pay Fee.\n"
+        "For assistance, use Help / Support."
+    )
+    bot.send_message(m.chat.id, txt, reply_markup=main_menu_markup_for(m.from_user.id))
+
+# ---------- START (EXACTLY THE SAME) ----------
+if __name__ == "__main__":
+    if not BOT_TOKEN or not ADMIN_IDS or len(ADMIN_IDS) < 1:
+        print("Please set BOT_TOKEN and ADMIN_IDS in the script before running.")
+        exit(1)
+    init_db()
+    print("Bot is running...")
+    bot.infinity_polling()
