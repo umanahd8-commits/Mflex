@@ -1074,11 +1074,11 @@ def fallback(m):
     )
     bot.send_message(m.chat.id, txt, reply_markup=main_menu_markup_for(m.from_user.id))
 
-# ---------- START (EXACTLY THE SAME) ----------
+# ---------- START ----------
 if __name__ == "__main__":
     if not BOT_TOKEN or not ADMIN_IDS or len(ADMIN_IDS) < 1:
         print("Please set BOT_TOKEN and ADMIN_IDS in the script before running.")
         exit(1)
     init_db()
     print("Bot is running...")
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True)  # ADD THIS PARAMETER
