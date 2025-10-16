@@ -1,3 +1,2 @@
-pytelegrambotapi
-psycopg2-binary
-python-dotenv
+pytelegrambotapi==4.19.1
+psycopg2-binary==2.9.9
