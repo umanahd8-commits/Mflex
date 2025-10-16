@@ -1074,11 +1074,26 @@ def fallback(m):
     )
     bot.send_message(m.chat.id, txt, reply_markup=main_menu_markup_for(m.from_user.id))
 
-# ---------- START (EXACTLY THE SAME) ----------
+# ---------- START (ROBUST VERSION) ----------
 if __name__ == "__main__":
     if not BOT_TOKEN or not ADMIN_IDS or len(ADMIN_IDS) < 1:
         print("Please set BOT_TOKEN and ADMIN_IDS in the script before running.")
         exit(1)
+    
     init_db()
-    print("Bot is running...")
-    bot.infinity_polling()
+    print("🚀 Starting MoniFlex Bot...")
+    
+    # Auto-restart on errors
+    while True:
+        try:
+            print("🔄 Clearing old webhooks...")
+            bot.delete_webhook()
+            time.sleep(2)
+            
+            print("🤖 Starting bot polling (skip_pending=True)...")
+            bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+            
+        except Exception as e:
+            print(f"❌ Bot error: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)
