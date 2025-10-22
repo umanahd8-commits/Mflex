@@ -3,6 +3,8 @@ from telebot import types
 import time
 import datetime
 import random
+import logging
+import requests
 import os
 import psycopg2
 
